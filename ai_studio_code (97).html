@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Accelerating Gesture Wheel</title>
+    
+    <!-- Load MediaPipe Hands from CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #121212;
+            color: white;
+            font-family: 'Courier New', Courier, monospace;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            height: 100vh;
+        }
+
+        /* HUD / Status Bar */
+        #hud {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            z-index: 10;
+            background: rgba(0, 0, 0, 0.8);
+            border: 1px solid #333;
+            padding: 15px;
+            border-radius: 8px;
+            width: 250px;
+        }
+
+        .status-row {
+            margin-bottom: 10px;
+            font-size: 18px;
+            display: flex;
+            justify-content: space-between;
+        }
+
+        .label { color: #888; }
+        #state-text { font-weight: bold; color: #ff5252; }
+        #speed-text { font-weight: bold; color: #00e676; }
+
+        /* Progress Bar for Speed */
+        .speed-bar-container {
+            width: 100%;
+            height: 10px;
+            background: #333;
+            border-radius: 5px;
+            overflow: hidden;
+        }
+        #speed-bar-fill {
+            height: 100%;
+            width: 0%;
+            background: linear-gradient(90deg, #00e676, #ffff00, #ff0000);
+            transition: width 0.1s linear;
+        }
+
+        /* Camera Feed */
+        #camera-container {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            width: 240px;
+            height: 180px;
+            border: 3px solid #333;
+            border-radius: 12px;
+            overflow: hidden;
+            z-index: 10;
+            background: black;
+            box-shadow: 0 0 15px rgba(0,255,100, 0.2);
+        }
+
+        #camera-canvas {
+            width: 100%;
+            height: 100%;
+            transform: scaleX(-1); /* Mirror effect */
+        }
+
+        /* 3D Wheel Scene */
+        .scene {
+            width: 350px;
+            height: 350px;
+            perspective: 1000px;
+            margin-top: 20vh;
+        }
+
+        .wheel {
+            width: 100%;
+            height: 100%;
+            position: relative;
+            transform-style: preserve-3d;
+            border-radius: 50%;
+        }
+
+        /* The Wheel Visuals */
+        .wheel-face {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            border-radius: 50%;
+            background: conic-gradient(
+                #ff0000 0deg 60deg,
+                #ffff00 60deg 120deg,
+                #00ff00 120deg 180deg,
+                #00ffff 180deg 240deg,
+                #0000ff 240deg 300deg,
+                #ff00ff 300deg 360deg
+            );
+            border: 12px solid #fff;
+            box-shadow: 0 0 50px rgba(255, 255, 255, 0.1);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        /* Hub inside wheel */
+        .hub {
+            width: 60px;
+            height: 60px;
+            background: #222;
+            border-radius: 50%;
+            border: 4px solid #555;
+            position: absolute;
+            z-index: 5;
+        }
+
+        /* Spokes effect */
+        .spoke {
+            position: absolute;
+            width: 100%;
+            height: 2px;
+            background: rgba(0,0,0,0.5);
+            top: 50%;
+        }
+
+        /* Arrow/Ticker */
+        .ticker {
+            position: absolute;
+            top: -25px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 0; 
+            height: 0; 
+            border-left: 20px solid transparent;
+            border-right: 20px solid transparent;
+            border-top: 40px solid white;
+            z-index: 20;
+            filter: drop-shadow(0 4px 4px rgba(0,0,0,0.5));
+        }
+
+        /* Loader */
+        #loader {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 24px;
+            background: rgba(0,0,0,0.9);
+            padding: 20px;
+            border-radius: 10px;
+            z-index: 100;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="loader">Initializing AI... Please Allow Camera.</div>
+
+    <div id="hud">
+        <div class="status-row">
+            <span class="label">STATUS:</span>
+            <span id="state-text">CLOSED</span>
+        </div>
+        <div class="status-row">
+            <span class="label">SPEED:</span>
+            <span id="speed-text">0</span>
+        </div>
+        <div class="speed-bar-container">
+            <div id="speed-bar-fill"></div>
+        </div>
+        <div style="margin-top:10px; font-size: 12px; color: #666;">
+            Open Hand = Accelerate<br>
+            Close Hand = Brake
+        </div>
+    </div>
+
+    <div class="scene">
+        <div class="ticker"></div>
+        <div class="wheel" id="wheel3d">
+            <div class="wheel-face">
+                <div class="spoke" style="transform: rotate(0deg)"></div>
+                <div class="spoke" style="transform: rotate(60deg)"></div>
+                <div class="spoke" style="transform: rotate(120deg)"></div>
+                <div class="hub"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Hidden Video & Visible Canvas -->
+    <video id="input_video" style="display:none;"></video>
+    <div id="camera-container">
+        <canvas id="camera-canvas"></canvas>
+    </div>
+
+    <script>
+        // --- 1. SETTINGS & PHYSICS VARIABLES ---
+        const SETTINGS = {
+            acceleration: 0.5,   // How much speed increases per frame when hand is open
+            friction: 0.2,       // How much speed decreases per frame when hand is closed
+            maxSpeed: 40,        // Maximum rotation speed
+            minStartSpeed: 2     // Initial kick when opening hand
+        };
+
+        let physics = {
+            currentSpeed: 0,
+            currentRotation: 0,
+            isHandOpen: false
+        };
+
+        // DOM Elements
+        const wheel = document.getElementById('wheel3d');
+        const stateText = document.getElementById('state-text');
+        const speedText = document.getElementById('speed-text');
+        const speedBar = document.getElementById('speed-bar-fill');
+        const loader = document.getElementById('loader');
+        const videoElement = document.getElementById('input_video');
+        const canvasElement = document.getElementById('camera-canvas');
+        const canvasCtx = canvasElement.getContext('2d');
+
+        // --- 2. PHYSICS LOOP (The Mechanism) ---
+        function updatePhysics() {
+            if (physics.isHandOpen) {
+                // ACCELERATE
+                if (physics.currentSpeed < SETTINGS.minStartSpeed) {
+                    physics.currentSpeed = SETTINGS.minStartSpeed;
+                }
+                if (physics.currentSpeed < SETTINGS.maxSpeed) {
+                    physics.currentSpeed += SETTINGS.acceleration;
+                }
+            } else {
+                // DECELERATE (Friction)
+                if (physics.currentSpeed > 0) {
+                    physics.currentSpeed -= SETTINGS.friction;
+                }
+                // Clamp to 0 so it doesn't go negative
+                if (physics.currentSpeed < 0) {
+                    physics.currentSpeed = 0;
+                }
+            }
+
+            // Apply Rotation
+            physics.currentRotation += physics.currentSpeed;
+            wheel.style.transform = `rotateZ(${physics.currentRotation}deg)`;
+
+            // Update UI
+            updateUI();
+
+            requestAnimationFrame(updatePhysics);
+        }
+        
+        function updateUI() {
+            // Speed Text
+            speedText.innerText = Math.floor(physics.currentSpeed * 10); // Scale up for display
+            
+            // Speed Bar
+            const percentage = (physics.currentSpeed / SETTINGS.maxSpeed) * 100;
+            speedBar.style.width = `${percentage}%`;
+
+            // State Text Color
+            if (physics.isHandOpen) {
+                stateText.innerText = "OPEN (GAS)";
+                stateText.style.color = "#00e676"; // Green
+            } else {
+                stateText.innerText = "CLOSED (BRAKE)";
+                stateText.style.color = "#ff5252"; // Red
+            }
+        }
+
+        // Start the physics loop immediately
+        updatePhysics();
+
+
+        // --- 3. MEDIAPIPE HAND LOGIC ---
+        function onResults(results) {
+            // Draw Camera Feed
+            canvasCtx.save();
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+            canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                const landmarks = results.multiHandLandmarks[0];
+
+                // Draw skeleton
+                drawConnectors(canvasCtx, landmarks, HAND_CONNECTIONS, {color: '#00FF00', lineWidth: 2});
+                drawLandmarks(canvasCtx, landmarks, {color: '#FFFFFF', lineWidth: 1});
+
+                // Check Gesture
+                physics.isHandOpen = isHandOpen(landmarks);
+            } else {
+                // No hand detected -> treat as closed
+                physics.isHandOpen = false;
+            }
+            canvasCtx.restore();
+        }
+
+        // Simple algorithm to detect if fingers are extended
+        function isHandOpen(landmarks) {
+            // Count extended fingers
+            let extendedCount = 0;
+            
+            // Tip vs Base(MCP) check for Index(8), Middle(12), Ring(16), Pinky(20)
+            if (landmarks[8].y < landmarks[5].y) extendedCount++; 
+            if (landmarks[12].y < landmarks[9].y) extendedCount++; 
+            if (landmarks[16].y < landmarks[13].y) extendedCount++; 
+            if (landmarks[20].y < landmarks[17].y) extendedCount++; 
+            
+            // Thumb check (x-axis based for right/left hand neutral)
+            // Simplified: Distance from tip to pinky knuckle must be large
+            const thumbTip = landmarks[4];
+            const pinkyBase = landmarks[17];
+            const thumbDist = Math.sqrt(Math.pow(thumbTip.x - pinkyBase.x, 2) + Math.pow(thumbTip.y - pinkyBase.y, 2));
+            if (thumbDist > 0.15) extendedCount++; // 0.15 is a relative threshold
+
+            // If 4 or 5 fingers are up, it's OPEN
+            return extendedCount >= 4;
+        }
+
+        // --- 4. INITIALIZATION ---
+        const hands = new Hands({locateFile: (file) => {
+            return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+        }});
+
+        hands.setOptions({
+            maxNumHands: 1,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+
+        hands.onResults(onResults);
+
+        const camera = new Camera(videoElement, {
+            onFrame: async () => {
+                await hands.send({image: videoElement});
+            },
+            width: 320,
+            height: 240
+        });
+
+        camera.start()
+            .then(() => {
+                loader.style.display = 'none';
+                console.log("Camera started");
+            })
+            .catch(err => {
+                loader.innerHTML = "Error: " + err.message;
+            });
+
+    </script>
+</body>
+</html>
