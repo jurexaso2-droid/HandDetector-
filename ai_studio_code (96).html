@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hand Gesture 3D Wheel</title>
+    
+    <!-- Load MediaPipe Hands and Camera Utils from CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #1a1a1a;
+            color: white;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            height: 100vh;
+        }
+
+        /* UI Overlay */
+        #status {
+            position: absolute;
+            top: 20px;
+            font-size: 24px;
+            font-weight: bold;
+            z-index: 10;
+            background: rgba(0,0,0,0.7);
+            padding: 10px 20px;
+            border-radius: 8px;
+            text-align: center;
+        }
+
+        .instruction {
+            font-size: 16px;
+            color: #aaa;
+            margin-top: 5px;
+        }
+
+        #camera-feed {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            width: 200px;
+            height: 150px;
+            border: 2px solid #00ffcc;
+            border-radius: 10px;
+            transform: scaleX(-1); /* Mirror the camera */
+            z-index: 10;
+            background: black;
+        }
+
+        /* 3D Wheel Scene */
+        .scene {
+            width: 300px;
+            height: 300px;
+            perspective: 1000px;
+            margin-top: 15vh;
+        }
+
+        .wheel {
+            width: 100%;
+            height: 100%;
+            position: relative;
+            transform-style: preserve-3d;
+            transition: transform 0.1s linear;
+            border-radius: 50%;
+        }
+
+        /* Wheel Decor */
+        .wheel-face {
+            position: absolute;
+            width: 300px;
+            height: 300px;
+            border-radius: 50%;
+            background: conic-gradient(
+                #ff5252 0deg 60deg,
+                #ffeb3b 60deg 120deg,
+                #00e676 120deg 180deg,
+                #2979ff 180deg 240deg,
+                #e040fb 240deg 300deg,
+                #ff9100 300deg 360deg
+            );
+            border: 10px solid white;
+            box-shadow: 0 0 20px rgba(0,0,0,0.5);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        /* Center Hub */
+        .hub {
+            width: 50px;
+            height: 50px;
+            background: #333;
+            border-radius: 50%;
+            position: absolute;
+            z-index: 5;
+            box-shadow: 0 0 10px black;
+        }
+
+        /* Arrow Indicator */
+        .indicator {
+            position: absolute;
+            top: -20px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 0; 
+            height: 0; 
+            border-left: 15px solid transparent;
+            border-right: 15px solid transparent;
+            border-top: 30px solid white;
+            z-index: 20;
+        }
+
+        /* Loading Spinner */
+        #loader {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 20px;
+            display: block;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="status">
+        Loading Model...
+        <div class="instruction">Please wait for camera permission</div>
+    </div>
+
+    <div id="loader">Initializing Hand Tracking...</div>
+
+    <!-- The 3D Wheel Scene -->
+    <div class="scene">
+        <div class="indicator"></div>
+        <div class="wheel" id="wheel3d">
+            <div class="wheel-face">
+                <div class="hub"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Camera Feed (Hidden video input, Canvas for overlay) -->
+    <video id="input_video" style="display:none;"></video>
+    <canvas id="camera-feed"></canvas>
+
+    <script>
+        // --- 1. CONFIGURATION & VARIABLES ---
+        const videoElement = document.getElementById('input_video');
+        const canvasElement = document.getElementById('camera-feed');
+        const canvasCtx = canvasElement.getContext('2d');
+        const statusText = document.getElementById('status');
+        const loader = document.getElementById('loader');
+        const wheel = document.getElementById('wheel3d');
+
+        let isSpinning = false;
+        let currentRotation = 0;
+        let spinSpeed = 15; // Degrees per frame
+        let animationId;
+
+        // --- 2. WHEEL ANIMATION LOOP ---
+        function animateWheel() {
+            if (isSpinning) {
+                currentRotation += spinSpeed;
+                wheel.style.transform = `rotateZ(${currentRotation}deg)`;
+            }
+            requestAnimationFrame(animateWheel);
+        }
+        // Start the animation loop immediately
+        animateWheel();
+
+        // --- 3. GESTURE DETECTION LOGIC ---
+        function onResults(results) {
+            // Clear the mini-camera feed
+            canvasCtx.save();
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+            canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+
+            // Check if hands are detected
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                const landmarks = results.multiHandLandmarks[0]; // Get the first hand detected
+
+                // Draw skeleton on the mini-feed
+                drawConnectors(canvasCtx, landmarks, HAND_CONNECTIONS, {color: '#00FF00', lineWidth: 2});
+                drawLandmarks(canvasCtx, landmarks, {color: '#FF0000', lineWidth: 1});
+
+                // Detect Open vs Closed
+                if (isHandOpen(landmarks)) {
+                    isSpinning = true;
+                    statusText.innerHTML = "Hand OPEN <br><span style='color:#00e676'>SPINNING</span>";
+                } else {
+                    isSpinning = false;
+                    statusText.innerHTML = "Hand CLOSED <br><span style='color:#ff5252'>STOPPED</span>";
+                }
+            } else {
+                // No hand detected
+                isSpinning = false;
+                statusText.innerHTML = "No Hand Detected";
+            }
+            canvasCtx.restore();
+        }
+
+        // --- 4. ALGORITHM: IS HAND OPEN? ---
+        // We check if fingertips are higher than the finger base (MCP) or middle joint (PIP)
+        // Since the hand might be rotated, a distance check is more robust, 
+        // but for a simple project, checking if fingers are extended relative to the palm works well.
+        function isHandOpen(landmarks) {
+            let fingersExtended = 0;
+
+            // MediaPipe Landmark Indexes:
+            // Thumb: 4 (Tip), 2 (MCP)
+            // Index: 8 (Tip), 5 (MCP)
+            // Middle: 12 (Tip), 9 (MCP)
+            // Ring: 16 (Tip), 13 (MCP)
+            // Pinky: 20 (Tip), 17 (MCP)
+
+            // Calculate distance between Tip and Wrist(0) vs MCP and Wrist(0)
+            // If Tip is further from wrist than MCP is, the finger is extended.
+
+            // Helper to get distance between two points
+            function getDist(idx1, idx2) {
+                const x = landmarks[idx1].x - landmarks[idx2].x;
+                const y = landmarks[idx1].y - landmarks[idx2].y;
+                return Math.sqrt(x*x + y*y);
+            }
+
+            // Threshold logic:
+            // Thumb is a bit special, usually check X distance relative to wrist for side movement, 
+            // but simplified: check distance of tip to pinky MCP(17).
+            if (getDist(4, 17) > getDist(3, 17)) fingersExtended++; 
+
+            // Fingers (Index, Middle, Ring, Pinky)
+            // Compare Tip(8) distance to Wrist(0) vs PIP(6) distance to Wrist(0)
+            if (getDist(8, 0) > getDist(6, 0)) fingersExtended++;  // Index
+            if (getDist(12, 0) > getDist(10, 0)) fingersExtended++; // Middle
+            if (getDist(16, 0) > getDist(14, 0)) fingersExtended++; // Ring
+            if (getDist(20, 0) > getDist(18, 0)) fingersExtended++; // Pinky
+
+            // If 4 or more fingers are extended, we consider it OPEN.
+            // If 0 or 1, it's CLOSED.
+            return fingersExtended >= 4;
+        }
+
+        // --- 5. SETUP MEDIAPIPE ---
+        const hands = new Hands({locateFile: (file) => {
+            return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+        }});
+
+        hands.setOptions({
+            maxNumHands: 1,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+
+        hands.onResults(onResults);
+
+        // --- 6. START CAMERA ---
+        const camera = new Camera(videoElement, {
+            onFrame: async () => {
+                await hands.send({image: videoElement});
+            },
+            width: 320,
+            height: 240
+        });
+
+        // Initialize
+        loader.style.display = 'block';
+        camera.start()
+            .then(() => {
+                loader.style.display = 'none';
+                statusText.innerHTML = "Show your hand!";
+            })
+            .catch(err => {
+                loader.innerHTML = "Error accessing camera. <br>Please allow camera access and use HTTPS/Localhost.";
+                console.error(err);
+            });
+
+    </script>
+</body>
+</html>
