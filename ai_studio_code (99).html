@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Hand Mirror</title>
+    
+    <!-- MediaPipe Dependencies -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+    
+    <!-- Three.js (3D Engine) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #121212;
+            color: white;
+            font-family: 'Courier New', Courier, monospace;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            height: 100vh;
+        }
+
+        /* 3D Canvas Container */
+        #canvas-container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 1;
+            background: radial-gradient(circle at center, #1a1a1a 0%, #000000 100%);
+        }
+
+        /* HUD / Status Bar */
+        #hud {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            z-index: 10;
+            background: rgba(0, 0, 0, 0.8);
+            border: 1px solid #333;
+            padding: 15px;
+            border-radius: 8px;
+            width: 250px;
+            pointer-events: none; /* Let clicks pass through */
+        }
+
+        .label { color: #888; font-size: 12px; }
+        .info { color: #00e676; font-weight: bold; font-size: 16px; }
+
+        /* Small Camera Feed (Picture in Picture) */
+        #camera-container {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            width: 160px;
+            height: 120px;
+            border: 2px solid #333;
+            border-radius: 8px;
+            overflow: hidden;
+            z-index: 10;
+            background: black;
+            opacity: 0.8;
+        }
+
+        #camera-canvas {
+            width: 100%;
+            height: 100%;
+            transform: scaleX(-1); /* Mirror effect */
+        }
+
+        #loader {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 24px;
+            background: rgba(0,0,0,0.9);
+            padding: 20px;
+            border-radius: 10px;
+            z-index: 100;
+            border: 1px solid #00e676;
+            color: #00e676;
+            box-shadow: 0 0 20px rgba(0, 230, 118, 0.2);
+        }
+    </style>
+</head>
+<body>
+
+    <div id="loader">Initializing 3D Hand... Please Allow Camera.</div>
+
+    <div id="hud">
+        <div class="label">SYSTEM STATUS</div>
+        <div class="info" id="status-text">WAITING FOR HAND...</div>
+        <br>
+        <div class="label">MODE</div>
+        <div class="info">REAL-TIME MIMIC</div>
+    </div>
+
+    <!-- 3D Scene renders here -->
+    <div id="canvas-container"></div>
+
+    <!-- MediaPipe Inputs (Hidden Video, Small Canvas) -->
+    <video id="input_video" style="display:none;"></video>
+    <div id="camera-container">
+        <canvas id="camera-canvas"></canvas>
+    </div>
+
+    <script>
+        // --- 1. SETUP THREE.JS (The 3D World) ---
+        const container = document.getElementById('canvas-container');
+        const scene = new THREE.Scene();
+        
+        // Add some fog for depth
+        scene.fog = new THREE.FogExp2(0x000000, 0.03);
+
+        const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 100);
+        camera.position.z = 25; // Move camera back
+        camera.position.y = 0;
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        container.appendChild(renderer.domElement);
+
+        // Lights
+        const ambientLight = new THREE.AmbientLight(0x404040); // Soft white light
+        scene.add(ambientLight);
+
+        const dirLight = new THREE.DirectionalLight(0xffffff, 1);
+        dirLight.position.set(10, 10, 10);
+        scene.add(dirLight);
+        
+        const pointLight = new THREE.PointLight(0x00e676, 1, 50);
+        pointLight.position.set(0, 0, 5);
+        scene.add(pointLight);
+
+        // --- 2. BUILD THE 3D HAND MODEL ---
+        // We will build the hand procedurally using Spheres (joints) and Cylinders (bones)
+        
+        const jointMeshes = [];
+        const boneMeshes = [];
+        
+        // Materials
+        const jointMaterial = new THREE.MeshPhongMaterial({ color: 0x00ffff, emissive: 0x0044aa });
+        const boneMaterial = new THREE.MeshPhongMaterial({ color: 0x333333, specular: 0x666666, shininess: 100 });
+
+        // Create 21 Spheres for Landmarks
+        for (let i = 0; i < 21; i++) {
+            const geometry = new THREE.SphereGeometry(0.3, 16, 16); // Size of joints
+            const sphere = new THREE.Mesh(geometry, jointMaterial);
+            scene.add(sphere);
+            jointMeshes.push(sphere);
+        }
+
+        // Define Hand Connections (Bone Map)
+        const HAND_CONNECTIONS_LIST = [
+            [0,1], [1,2], [2,3], [3,4],       // Thumb
+            [0,5], [5,6], [6,7], [7,8],       // Index
+            [0,9], [9,10], [10,11], [11,12],  // Middle
+            [0,13], [13,14], [14,15], [15,16],// Ring
+            [0,17], [17,18], [18,19], [19,20] // Pinky
+        ];
+
+        // Create Cylinders for Bones
+        HAND_CONNECTIONS_LIST.forEach(() => {
+            const geometry = new THREE.CylinderGeometry(0.15, 0.15, 1, 8); // Thickness of bones
+            const bone = new THREE.Mesh(geometry, boneMaterial);
+            scene.add(bone);
+            boneMeshes.push(bone);
+        });
+
+        // Helper Group to transform the whole hand easily
+        const handGroup = new THREE.Group();
+        scene.add(handGroup);
+        // Add all parts to the group
+        jointMeshes.forEach(m => handGroup.add(m));
+        boneMeshes.forEach(m => handGroup.add(m));
+
+
+        // --- 3. MEDIAPIPE LOGIC ---
+        const videoElement = document.getElementById('input_video');
+        const canvasElement = document.getElementById('camera-canvas');
+        const canvasCtx = canvasElement.getContext('2d');
+        const statusText = document.getElementById('status-text');
+        const loader = document.getElementById('loader');
+
+        function onResults(results) {
+            // Update small debug canvas
+            canvasCtx.save();
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+            canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+            canvasCtx.restore();
+
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                statusText.innerText = "TRACKING ACTIVE";
+                statusText.style.color = "#00e676";
+                
+                const landmarks = results.multiHandLandmarks[0];
+                update3DHand(landmarks);
+            } else {
+                statusText.innerText = "NO HAND DETECTED";
+                statusText.style.color = "#ff5252";
+            }
+        }
+
+        // --- 4. MAPPING 2D AI DATA TO 3D WORLD ---
+        function update3DHand(landmarks) {
+            // 1. Update Joints Positions
+            // MediaPipe returns x,y [0,1]. z is relative depth.
+            // We map this to a 3D world space, e.g., x[-10, 10], y[-10, 10]
+            
+            const xMult = 20; // Width scale
+            const yMult = 15; // Height scale
+            const zMult = 20; // Depth scale (important for 3D feel)
+
+            // Center offset
+            const xOff = 10;
+            const yOff = 7.5;
+
+            landmarks.forEach((lm, index) => {
+                const mesh = jointMeshes[index];
+                
+                // Map coordinates
+                // Invert X because camera is mirrored
+                // Invert Y because MediaPipe Y is top-down, 3D is bottom-up
+                mesh.position.x = (lm.x * -xMult) + xOff;
+                mesh.position.y = (lm.y * -yMult) + yOff;
+                mesh.position.z = lm.z * -zMult; 
+            });
+
+            // 2. Update Bones (Connectors)
+            // A bone connects Joint A and Joint B.
+            // We need to position the cylinder at the midpoint,
+            // scale it to the distance, and rotate it to look at B.
+            
+            HAND_CONNECTIONS_LIST.forEach((pair, index) => {
+                const bone = boneMeshes[index];
+                const indexA = pair[0];
+                const indexB = pair[1];
+
+                const posA = jointMeshes[indexA].position;
+                const posB = jointMeshes[indexB].position;
+
+                // 1. Position: Midpoint
+                bone.position.copy(posA).add(posB).multiplyScalar(0.5);
+
+                // 2. LookAt: Rotate to face destination
+                bone.lookAt(posB);
+                // Rotate 90deg on X because ThreeJS cylinders point UP (Y) by default, 
+                // but lookAt makes Z point to target.
+                bone.rotateX(Math.PI / 2);
+
+                // 3. Scale: Length of bone
+                const distance = posA.distanceTo(posB);
+                bone.scale.set(1, distance, 1); // Scale Y is the length
+            });
+        }
+
+
+        // --- 5. INITIALIZATION & LOOP ---
+        const hands = new Hands({locateFile: (file) => {
+            return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+        }});
+
+        hands.setOptions({
+            maxNumHands: 1,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+
+        hands.onResults(onResults);
+
+        const cam = new Camera(videoElement, {
+            onFrame: async () => {
+                await hands.send({image: videoElement});
+            },
+            width: 320,
+            height: 240
+        });
+
+        cam.start()
+            .then(() => {
+                loader.style.display = 'none';
+            })
+            .catch(err => {
+                loader.innerText = "Error: " + err.message;
+            });
+
+        // Animation Loop (Standard Three.js)
+        function animate() {
+            requestAnimationFrame(animate);
+            
+            // Add slight idle rotation to the whole group if desired, 
+            // or just let it be controlled purely by hand.
+            // handGroup.rotation.y += 0.002; 
+
+            renderer.render(scene, camera);
+        }
+        animate();
+
+        // Handle Window Resize
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+    </script>
+</body>
+</html>
