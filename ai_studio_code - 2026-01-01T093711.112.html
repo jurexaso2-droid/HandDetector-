@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>3D Hand: Box Grabber</title>
+    
+    <!-- MediaPipe Dependencies -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+    
+    <!-- Three.js (3D Engine) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #121212;
+            color: white;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            height: 100vh;
+            touch-action: none; /* Prevent scrolling on mobile */
+        }
+
+        /* 3D Canvas Container */
+        #canvas-container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 1;
+            background: radial-gradient(circle at center, #1a1a1a 0%, #000000 100%);
+        }
+
+        /* HUD */
+        #hud {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            z-index: 10;
+            background: rgba(0, 0, 0, 0.85);
+            border: 1px solid #444;
+            padding: 20px;
+            border-radius: 12px;
+            width: 260px; /* Slightly smaller for mobile */
+            box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+            pointer-events: none;
+        }
+
+        .label { color: #aaa; font-size: 11px; letter-spacing: 1px; margin-bottom: 4px;}
+        .info { color: #fff; font-weight: bold; font-size: 18px; margin-bottom: 15px; }
+        .highlight { color: #00e676; }
+        .instruction { font-size: 14px; color: #ddd; line-height: 1.4; border-top: 1px solid #444; padding-top: 10px;}
+
+        /* Camera Feed */
+        #camera-container {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            width: 120px; /* Smaller for mobile */
+            height: 160px; /* Portrait aspect ratio */
+            border: 2px solid #333;
+            border-radius: 8px;
+            overflow: hidden;
+            z-index: 10;
+            background: black;
+            opacity: 0.8;
+        }
+
+        #camera-canvas {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            transform: scaleX(-1);
+        }
+
+        #loader {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 18px;
+            background: rgba(0,0,0,0.9);
+            padding: 20px 30px;
+            border-radius: 30px;
+            z-index: 100;
+            border: 1px solid #00e676;
+            color: #00e676;
+            box-shadow: 0 0 20px rgba(0, 230, 118, 0.2);
+            text-align: center;
+            width: 80%;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="loader">Initializing Camera...<br><small>Please allow permissions</small></div>
+
+    <div id="hud">
+        <div class="label">SYSTEM STATUS</div>
+        <div class="info" id="status-text">WAITING...</div>
+
+        <div class="label">INTERACTION</div>
+        <div class="info" id="interaction-text">IDLE</div>
+
+        <div class="instruction">
+            🤏 <strong>PINCH</strong> (Index & Thumb) to grab.<br>
+            ✋ <strong>RELEASE</strong> to drop.
+        </div>
+    </div>
+
+    <!-- 3D Scene -->
+    <div id="canvas-container"></div>
+
+    <!-- 
+      FIX: Video element MUST have playsinline, autoplay, muted for mobile. 
+      We hide it with opacity/position instead of display:none to ensure it renders.
+    -->
+    <video id="input_video" playsinline webkit-playsinline muted autoplay style="position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none;"></video>
+    
+    <div id="camera-container">
+        <canvas id="camera-canvas"></canvas>
+    </div>
+
+    <script>
+        // --- 1. THREE.JS SETUP ---
+        const container = document.getElementById('canvas-container');
+        const scene = new THREE.Scene();
+        scene.fog = new THREE.FogExp2(0x111111, 0.02);
+
+        const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 100);
+        camera.position.z = 25;
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio); // Sharper on mobile
+        renderer.shadowMap.enabled = true;
+        container.appendChild(renderer.domElement);
+
+        // Lighting
+        const ambLight = new THREE.AmbientLight(0x505050); 
+        scene.add(ambLight);
+
+        const dirLight = new THREE.DirectionalLight(0xffffff, 1);
+        dirLight.position.set(10, 20, 10);
+        dirLight.castShadow = true;
+        scene.add(dirLight);
+        
+        const pointLight = new THREE.PointLight(0x00e676, 0.8, 50);
+        pointLight.position.set(0, 5, 10);
+        scene.add(pointLight);
+
+        // --- 2. CREATE HAND MODEL ---
+        const jointMeshes = [];
+        const boneMeshes = [];
+        const handGroup = new THREE.Group();
+        scene.add(handGroup);
+
+        const jointMat = new THREE.MeshPhongMaterial({ color: 0x00ffff, emissive: 0x002255 });
+        const boneMat = new THREE.MeshPhongMaterial({ color: 0x888888 });
+
+        // Create 21 Joints
+        for (let i = 0; i < 21; i++) {
+            const geo = new THREE.SphereGeometry(0.3, 16, 16);
+            const mesh = new THREE.Mesh(geo, jointMat);
+            handGroup.add(mesh);
+            jointMeshes.push(mesh);
+        }
+
+        // Bones Map
+        const CONNECTIONS = [
+            [0,1], [1,2], [2,3], [3,4],       
+            [0,5], [5,6], [6,7], [7,8],       
+            [0,9], [9,10], [10,11], [11,12],  
+            [0,13], [13,14], [14,15], [15,16],
+            [0,17], [17,18], [18,19], [19,20] 
+        ];
+
+        CONNECTIONS.forEach(() => {
+            const geo = new THREE.CylinderGeometry(0.12, 0.12, 1, 8);
+            const mesh = new THREE.Mesh(geo, boneMat);
+            handGroup.add(mesh);
+            boneMeshes.push(mesh);
+        });
+
+        // --- 3. CREATE INTERACTIVE BOXES ---
+        const boxes = [];
+        const boxGeometry = new THREE.BoxGeometry(2.5, 2.5, 2.5);
+        const boxColors = [0xFF0000, 0xFFFF00, 0x00FF00, 0x00FFFF, 0xFF00FF];
+
+        for(let i=0; i<5; i++){
+            const mat = new THREE.MeshStandardMaterial({ 
+                color: boxColors[i], 
+                roughness: 0.2, 
+                metalness: 0.5 
+            });
+            const box = new THREE.Mesh(boxGeometry, mat);
+            
+            // Random Position
+            box.position.x = (Math.random() - 0.5) * 12; 
+            box.position.y = (Math.random() - 0.5) * 12; 
+            box.position.z = (Math.random() - 0.5) * 5; 
+            
+            box.userData = { 
+                id: i,
+                originalColor: boxColors[i], 
+                isGrabbed: false
+            };
+
+            scene.add(box);
+            boxes.push(box);
+        }
+
+        // --- 4. GAME STATE ---
+        let grabbedBox = null;
+        let pinchCenter = new THREE.Vector3();
+        let isPinching = false;
+        const GRAB_THRESHOLD = 3.0; 
+        const INTERACTION_DISTANCE = 4.0; 
+
+        const statusText = document.getElementById('status-text');
+        const interactText = document.getElementById('interaction-text');
+        const loader = document.getElementById('loader');
+        const canvasElement = document.getElementById('camera-canvas');
+        const canvasCtx = canvasElement.getContext('2d');
+
+        // --- 5. MEDIAPIPE LOGIC ---
+        function onResults(results) {
+            // Draw debug video to small canvas
+            // IMPORTANT: Clear canvas first to avoid trails
+            canvasCtx.save();
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+            canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+            canvasCtx.restore();
+
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                statusText.innerText = "HAND DETECTED";
+                statusText.className = "info highlight";
+                loader.style.display = 'none';
+                
+                const landmarks = results.multiHandLandmarks[0];
+                update3DHand(landmarks);
+                checkInteractions();
+            } else {
+                statusText.innerText = "NO HAND FOUND";
+                statusText.className = "info";
+                if(grabbedBox) releaseBox();
+            }
+        }
+
+        function update3DHand(landmarks) {
+            // Adjusted multipliers for better mobile mapping
+            const xMult = 25; const yMult = 20; const zMult = 25;
+            const xOff = 12.5; const yOff = 10;
+
+            landmarks.forEach((lm, index) => {
+                const mesh = jointMeshes[index];
+                mesh.position.x = (lm.x * -xMult) + xOff;
+                mesh.position.y = (lm.y * -yMult) + yOff;
+                mesh.position.z = lm.z * -zMult;
+            });
+
+            // Update Bones
+            CONNECTIONS.forEach((pair, index) => {
+                const bone = boneMeshes[index];
+                const posA = jointMeshes[pair[0]].position;
+                const posB = jointMeshes[pair[1]].position;
+
+                bone.position.copy(posA).add(posB).multiplyScalar(0.5);
+                bone.lookAt(posB);
+                bone.rotateX(Math.PI / 2);
+                bone.scale.set(1, posA.distanceTo(posB), 1);
+            });
+
+            // Pinch Logic
+            const indexTip = jointMeshes[8].position;
+            const thumbTip = jointMeshes[4].position;
+
+            pinchCenter.copy(indexTip).add(thumbTip).multiplyScalar(0.5);
+            const pinchDistance = indexTip.distanceTo(thumbTip);
+            
+            if(isPinching) {
+                if(pinchDistance > GRAB_THRESHOLD * 1.5) isPinching = false;
+            } else {
+                if(pinchDistance < GRAB_THRESHOLD) isPinching = true;
+            }
+        }
+
+        function checkInteractions() {
+            if (grabbedBox) {
+                interactText.innerText = "HOLDING BOX";
+                interactText.style.color = "#00e676";
+                grabbedBox.position.copy(pinchCenter);
+                if (!isPinching) releaseBox();
+            } else {
+                let closestBox = null;
+                let minDist = Infinity;
+
+                boxes.forEach(box => {
+                    const dist = box.position.distanceTo(pinchCenter);
+                    box.material.emissive.setHex(0x000000); // Reset color
+                    
+                    if (dist < INTERACTION_DISTANCE) {
+                        if (dist < minDist) {
+                            minDist = dist;
+                            closestBox = box;
+                        }
+                    }
+                });
+
+                if (closestBox) {
+                    closestBox.material.emissive.setHex(0x555555);
+                    interactText.innerText = "READY TO GRAB";
+                    interactText.style.color = "#ffff00";
+                    if (isPinching) grabBox(closestBox);
+                } else {
+                    interactText.innerText = "IDLE";
+                    interactText.style.color = "#fff";
+                }
+            }
+        }
+
+        function grabBox(box) {
+            grabbedBox = box;
+            box.userData.isGrabbed = true;
+            box.material.color.setHex(0xFFFFFF); 
+        }
+
+        function releaseBox() {
+            if(grabbedBox) {
+                grabbedBox.userData.isGrabbed = false;
+                grabbedBox.material.color.setHex(grabbedBox.userData.originalColor);
+                grabbedBox = null;
+            }
+        }
+
+        // --- 6. INITIALIZATION ---
+        const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+        
+        hands.setOptions({
+            maxNumHands: 1,
+            modelComplexity: 1, // 0 is faster, 1 is more accurate. Try 0 if slow on mobile.
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+        
+        hands.onResults(onResults);
+
+        // Fixed Camera Init for Mobile
+        const videoElement = document.getElementById('input_video');
+        const cam = new Camera(videoElement, {
+            onFrame: async () => {
+                await hands.send({image: videoElement});
+            },
+            width: 480,  // Standard mobile width
+            height: 640, // Standard mobile height (Portrait)
+            facingMode: "user" // Request Front Camera
+        });
+
+        cam.start()
+            .then(() => {
+                console.log("Camera started successfully");
+            })
+            .catch(err => {
+                loader.innerHTML = "Error: " + err.message + "<br>Check permissions.";
+            });
+
+        function animate() {
+            requestAnimationFrame(animate);
+            // Rotations removed! Boxes will now stay still.
+            renderer.render(scene, camera);
+        }
+        animate();
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>
